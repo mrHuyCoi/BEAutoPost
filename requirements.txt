@@ -53,3 +53,4 @@ fastapi-mail>=1.4.0
 # --- Frontend / Dashboard ---
 streamlit>=1.45.0
 python-docx
+python-multipart
