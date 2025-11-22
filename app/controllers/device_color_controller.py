@@ -29,6 +29,7 @@ async def create_device_color(
     Tạo một liên kết giữa thiết bị và màu sắc mới.
     """
     try:
+
         # Truyền current_user vào service để phân quyền admin
         device_color = await DeviceColorService.create_device_color(db, data, current_user)
         return ResponseModel(
@@ -49,8 +50,12 @@ async def create_device_color(
 
 @router.get("", response_model=ResponseModel[List[DeviceColorWithColorRead]])
 async def get_all_device_colors(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(10, ge=1, le=100),
+    # --- THAY ĐỔI 1: Đổi tên tham số ---
+    # Đặt pageNum mặc định là 1 (trang đầu tiên)
+    pageNum: int = Query(1, ge=1, description="Số trang bắt đầu từ 1"), 
+    # Đặt pageSize mặc định là 10, giới hạn 1-100
+    pageSize: int = Query(10, ge=1, le=100, description="Số lượng mục trên mỗi trang"), 
+    
     search: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -59,23 +64,36 @@ async def get_all_device_colors(
     Lấy danh sách tất cả liên kết giữa thiết bị và màu sắc với phân trang và tìm kiếm.
     """
     try:
-        # Chỉ lấy liên kết của user hiện tại hoặc liên kết mặc định
-        device_colors = await DeviceColorService.get_all_device_colors(db, skip, limit, search, current_user.id)
-        total = await DeviceColorService.count_device_colors(db, search, current_user.id)
+        # --- THAY ĐỔI 2: Chuyển đổi từ pageNum/pageSize sang skip/limit ---
+        limit = pageSize
+        skip = (pageNum - 1) * pageSize
+        # Admin có thể xem tất cả, user thường chỉ xem của mình
+        user_id = None if current_user.is_admin else current_user.id
+        # --- KHÔNG THAY ĐỔI: Các dòng gọi service vẫn như cũ ---
+        # Service và Repository vẫn dùng skip/limit
+        device_colors = await DeviceColorService.get_all_device_colors(db, skip, limit, search, user_id)
+        total = await DeviceColorService.count_device_colors(db, search, user_id)
+        
+        total_pages = (total + limit - 1) // limit if total > 0 else 1
         
         return ResponseModel.success(
             data=device_colors,
             message="Lấy danh sách liên kết giữa thiết bị và màu sắc thành công",
             total=total,
-            totalPages=(total + limit - 1) // limit
+            totalPages=total_pages,
+            pagination={
+                "pageNum": pageNum,
+                "pageSize": pageSize,
+                "total": total,
+                "totalPages": total_pages
+            }
         )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Đã xảy ra lỗi: {str(e)}"
         )
-
-
+    
 @router.get("/{device_color_id}", response_model=ResponseModel[DeviceColorRead])
 async def get_device_color(
     device_color_id: uuid.UUID,
@@ -198,8 +216,9 @@ async def delete_device_color(
     Xóa một liên kết giữa thiết bị và màu sắc.
     """
     try:
+        print(current_user)
         # Chỉ cho phép xóa liên kết của chính mình
-        result = await DeviceColorService.delete_device_color(db, device_color_id, current_user)
+        result = await DeviceColorService.delete_device_color(db, device_color_id, current_user.id)
         if not result:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

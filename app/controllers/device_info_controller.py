@@ -168,9 +168,18 @@ async def get_all_device_infos(
         total_count = await DeviceInfoService.count_device_infos(db, current_user, search, brand)
         total_pages = max(1, (total_count + limit - 1) // limit)  # Ceiling division
         
+        # Tính pageNum từ skip và limit (pageNum bắt đầu từ 1)
+        page_num = (skip // limit) + 1
+        
         return ResponseModel.success(
             data=device_infos,
             message="Lấy danh sách thông tin thiết bị thành công",
+            pagination={
+                "pageNum": page_num,
+                "pageSize": limit,
+                "total": total_count,
+                "totalPages": total_pages
+            },
             total=total_count,
             totalPages=total_pages
         )

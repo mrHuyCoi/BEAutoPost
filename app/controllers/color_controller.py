@@ -108,12 +108,20 @@ async def get_all_colors(
         
         # Lấy danh sách màu sắc với phân trang và tìm kiếm (chỉ màu sắc của user hoặc mặc định)
         colors = await ColorService.get_all_colors(db, skip, limit, search, current_user)
-        
+        total_pages = (total + limit - 1) // limit
+        page_num = (skip // limit) + 1
+
         return ResponseModel.success(
             data=colors,
             message="Lấy danh sách màu sắc thành công",
             total=total,
-            totalPages=max(1, (total + limit - 1) // limit)
+            totalPages=max(1, (total + limit - 1) // limit),
+            pagination = {
+                "pageNum": page_num,
+                "pageSize": limit,
+                "total": total,
+                "totalPages": total_pages
+            }
         )
     except Exception as e:
         raise HTTPException(

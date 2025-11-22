@@ -2,18 +2,158 @@ from fastapi import APIRouter, Depends, HTTPException, status, Body, UploadFile,
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List, Dict
 import traceback
+import logging
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+logger = logging.getLogger(__name__)
+
 from app.database.database import get_db
+from app.dto.response import ResponseModel
 from app.middlewares.subscription_middleware import check_active_subscription
-from app.services.scheduled_post_service import ScheduledPostService
-from app.schemas.schedule_schema import PlatformPostResponse
-from app.utils.crypto import token_encryption
 from app.repositories.platform_post_repository import PlatformPostRepository
+from app.schemas.schedule_schema import PlatformPostResponse
+from app.schemas.script_schema import ScriptGenerationRequest, ScriptGenerationResponse
+from app.schemas.video_generation_schema import VideoGenerationRequest, VideoGenerationResponse
+from app.services.scheduled_post_service import ScheduledPostService
+from app.services.script_generation_service import ScriptGenerationService
+from app.services.video_generation_service import VideoGenerationService
+from app.utils.crypto import token_encryption
 
 router = APIRouter()
+
+
+@router.post("/generate-script", response_model=ResponseModel[ScriptGenerationResponse])
+async def generate_video_script(
+    payload: ScriptGenerationRequest,
+    current_user=Depends(check_active_subscription(required_max_videos_per_day=1)),
+):
+    """
+    Endpoint tạo kịch bản video bằng AI dựa trên các thông tin đầu vào.
+    """
+    try:
+        provider = payload.llm_provider.lower()
+
+        # Ưu tiên khóa API gửi lên từ client; nếu không có thì lấy theo user đang đăng nhập
+        openai_key = payload.openai_key
+        gemini_key = payload.gemini_key
+
+        if provider == "openai" and not openai_key and getattr(current_user, "openai_api_key", None):
+            openai_key = token_encryption.decrypt(current_user.openai_api_key)
+        if provider == "gemini" and not gemini_key and getattr(current_user, "gemini_api_key", None):
+            gemini_key = token_encryption.decrypt(current_user.gemini_api_key)
+
+        script = await ScriptGenerationService.generate_script(
+            video_subject=payload.video_subject,
+            video_language=payload.video_language,
+            video_keywords=payload.video_keywords,
+            script_style=payload.script_style,
+            paragraph_number=payload.paragraph_number,
+            llm_provider=payload.llm_provider,
+            openai_key=openai_key,
+            gemini_key=gemini_key,
+        )
+
+        return ResponseModel.success(
+            data=ScriptGenerationResponse(script=script),
+            message="Sinh kịch bản thành công",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Lỗi khi sinh kịch bản: {str(e)}")
+
+
+@router.post("/generate-video", response_model=ResponseModel[VideoGenerationResponse])
+async def generate_video_with_ai(
+    payload: VideoGenerationRequest,
+    current_user=Depends(check_active_subscription(required_max_videos_per_day=1)),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Endpoint tạo video bằng AI dựa trên kịch bản và các thông số cấu hình.
+    
+    API này sẽ:
+    1. Nhận kịch bản video và các thông số cấu hình
+    2. Tạo video với TTS, materials, BGM, subtitles
+    3. Trả về video_id để theo dõi tiến trình
+    
+    Video generation là một process async, client cần poll status endpoint
+    để kiểm tra tiến trình.
+    """
+    try:
+        # Ưu tiên API keys từ request, nếu không có thì lấy từ user
+        openai_key = payload.openai_key
+        gemini_key = payload.gemini_key
+        
+        if not openai_key and getattr(current_user, "openai_api_key", None):
+            try:
+                openai_key = token_encryption.decrypt(current_user.openai_api_key)
+            except Exception:
+                logger.warning(f"Không thể decrypt OpenAI key cho user {current_user.id}")
+        
+        if not gemini_key and getattr(current_user, "gemini_api_key", None):
+            try:
+                gemini_key = token_encryption.decrypt(current_user.gemini_api_key)
+            except Exception:
+                logger.warning(f"Không thể decrypt Gemini key cho user {current_user.id}")
+        
+        # Gọi service để tạo video
+        result = await VideoGenerationService.generate_video(
+            db=db,
+            user_id=current_user.id,
+            request=payload,
+            openai_key=openai_key,
+            gemini_key=gemini_key,
+        )
+        
+        return ResponseModel.success(
+            data=result,
+            message="Đã khởi tạo quá trình tạo video. Vui lòng sử dụng video_id để theo dõi tiến trình.",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Lỗi khi tạo video: {str(e)}",
+        )
+
+
+@router.get("/video-status/{video_id}", response_model=ResponseModel[VideoGenerationResponse])
+async def get_video_generation_status(
+    video_id: str,
+    current_user=Depends(check_active_subscription()),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Lấy trạng thái của video generation job.
+    
+    Args:
+        video_id: ID của video cần kiểm tra
+        
+    Returns:
+        VideoGenerationResponse với trạng thái hiện tại
+    """
+    try:
+        result = await VideoGenerationService.get_video_status(
+            db=db,
+            video_id=video_id,
+            user_id=current_user.id,
+        )
+        return ResponseModel.success(data=result, message="Lấy trạng thái video thành công")
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Lỗi khi lấy trạng thái video: {str(e)}",
+        )
+
 
 @router.post("/generate-review")
 async def generate_review_content(
