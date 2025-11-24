@@ -50,24 +50,27 @@ class UserService:
             raise e
 
     @staticmethod
-    async def register_user(db: AsyncSession, data: UserCreate, verification_code: str) -> User:
-        # 1. Xác thực mã
-        code_obj = await VerificationCodeRepository.get_by_email_and_code(db, data.email, verification_code)
-        if not code_obj:
-            raise BadRequestException("Mã xác thực không hợp lệ hoặc đã hết hạn.")
+async def register_user(db: AsyncSession, data: UserCreate, verification_code: str) -> User:
+    # 1. Xác thực mã
+    code_obj = await VerificationCodeRepository.get_by_email_and_code(db, data.email, verification_code)
+    if not code_obj:
+        raise BadRequestException("Mã xác thực không hợp lệ hoặc đã hết hạn.")
 
-        # 2. Lấy thông tin gói đăng ký đã chọn
+    # 2. Nếu có subscription_id thì mới kiểm tra
+    subscription_plan = None
+    if data.subscription_id:
         subscription_plan = await db.get(Subscription, data.subscription_id)
         if not subscription_plan:
             raise BadRequestException("Gói đăng ký không hợp lệ")
 
-        # 3. Tạo người dùng mới
-        new_user = await UserRepository.create(db, data)
+    # 3. Tạo người dùng mới
+    new_user = await UserRepository.create(db, data)
 
-        # 4. Tạo bản ghi user_subscription
+    # 4. Nếu có subscription_id mới tạo user_subscription
+    if subscription_plan:
         from app.repositories.subscription_repository import SubscriptionRepository
         from app.dto.subscription_dto import SubscriptionCreate as UserSubscriptionCreate
-        
+
         current_time = datetime.now(timezone.utc)
         end_date = current_time + timedelta(days=subscription_plan.duration_days)
 
@@ -80,10 +83,11 @@ class UserService:
         )
         await SubscriptionRepository.create(db, user_sub_data)
 
-        # 5. Xóa mã xác thực đã sử dụng
-        await VerificationCodeRepository.delete(db, code_obj)
+    # 5. Xóa mã xác thực đã dùng
+    await VerificationCodeRepository.delete(db, code_obj)
 
-        return new_user
+    return new_user
+
 
     @staticmethod
     async def register_user_direct(db: AsyncSession, data: UserCreate) -> User:
