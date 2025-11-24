@@ -15,18 +15,12 @@ import random
 import string
 from datetime import datetime, timedelta, timezone
 
+
 class UserService:
-    """
-    Service xử lý các thao tác liên quan đến người dùng.
-    """
-    
+
     @staticmethod
     async def send_registration_code(db: AsyncSession, email: str):
-        """
-        Gửi mã xác thực đăng ký đến email của người dùng.
-        """
         try:
-            # Kiểm tra email đã tồn tại chưa (case-insensitive)
             existing_user = await UserRepository.get_by_email(db, email.lower())
             if existing_user:
                 raise BadRequestException("Email đã được đăng ký.")
@@ -37,101 +31,90 @@ class UserService:
             code_data = VerificationCodeCreate(email=email.lower(), code=code, expires_at=expires_at)
             await VerificationCodeRepository.create(db, code_data)
 
-            # Try to send email, but don't fail if email service is not configured
             try:
                 await EmailService.send_verification_code(email=email, code=code)
             except Exception as email_error:
-                print(f"Warning: Could not send email: {email_error}")
-                # Continue without failing the registration process
-                # In production, you might want to log this to a monitoring service
-                
+                print(f"Warning: Could not send verification email: {email_error}")
+
         except Exception as e:
             print(f"Error in send_registration_code: {str(e)}")
             raise e
 
     @staticmethod
-async def register_user(db: AsyncSession, data: UserCreate, verification_code: str) -> User:
-    # 1. Xác thực mã
-    code_obj = await VerificationCodeRepository.get_by_email_and_code(db, data.email, verification_code)
-    if not code_obj:
-        raise BadRequestException("Mã xác thực không hợp lệ hoặc đã hết hạn.")
+    async def register_user(db: AsyncSession, data: UserCreate, verification_code: str) -> User:
+        # 1. Xác thực mã
+        code_obj = await VerificationCodeRepository.get_by_email_and_code(db, data.email, verification_code)
+        if not code_obj:
+            raise BadRequestException("Mã xác thực không hợp lệ hoặc đã hết hạn.")
 
-    # 2. Nếu có subscription_id thì mới kiểm tra
-    subscription_plan = None
-    if data.subscription_id:
-        subscription_plan = await db.get(Subscription, data.subscription_id)
-        if not subscription_plan:
-            raise BadRequestException("Gói đăng ký không hợp lệ")
+        # 2. Kiểm tra subscription (nếu có)
+        subscription_plan = None
+        if data.subscription_id:
+            subscription_plan = await db.get(Subscription, data.subscription_id)
+            if not subscription_plan:
+                raise BadRequestException("Gói đăng ký không hợp lệ")
 
-    # 3. Tạo người dùng mới
-    new_user = await UserRepository.create(db, data)
+        # 3. Tạo user
+        new_user = await UserRepository.create(db, data)
 
-    # 4. Nếu có subscription_id mới tạo user_subscription
-    if subscription_plan:
-        from app.repositories.subscription_repository import SubscriptionRepository
-        from app.dto.subscription_dto import SubscriptionCreate as UserSubscriptionCreate
+        # 4. Gắn subscription cho user (nếu có)
+        if subscription_plan:
+            from app.repositories.subscription_repository import SubscriptionRepository
+            from app.dto.subscription_dto import SubscriptionCreate as UserSubscriptionCreate
 
-        current_time = datetime.now(timezone.utc)
-        end_date = current_time + timedelta(days=subscription_plan.duration_days)
+            current_time = datetime.now(timezone.utc)
+            end_date = current_time + timedelta(days=subscription_plan.duration_days)
 
-        user_sub_data = UserSubscriptionCreate(
-            user_id=new_user.id,
-            subscription_id=data.subscription_id,
-            start_date=current_time,
-            end_date=end_date,
-            is_active=False
-        )
-        await SubscriptionRepository.create(db, user_sub_data)
+            user_sub_data = UserSubscriptionCreate(
+                user_id=new_user.id,
+                subscription_id=data.subscription_id,
+                start_date=current_time,
+                end_date=end_date,
+                is_active=False
+            )
+            await SubscriptionRepository.create(db, user_sub_data)
 
-    # 5. Xóa mã xác thực đã dùng
-    await VerificationCodeRepository.delete(db, code_obj)
+        # 5. Xóa mã xác thực
+        await VerificationCodeRepository.delete(db, code_obj)
 
-    return new_user
-
+        return new_user
 
     @staticmethod
-async def register_user_direct(db: AsyncSession, data: UserCreate) -> User:
-    # 1. Kiểm tra email đã tồn tại chưa
-    existing_user = await UserRepository.get_by_email(db, data.email.lower())
-    if existing_user:
-        raise BadRequestException("Email đã được đăng ký.")
+    async def register_user_direct(db: AsyncSession, data: UserCreate) -> User:
+        existing_user = await UserRepository.get_by_email(db, data.email.lower())
+        if existing_user:
+            raise BadRequestException("Email đã được đăng ký.")
 
-    # 2. Nếu có subscription_id thì mới kiểm tra
-    subscription_plan = None
-    if data.subscription_id:
-        subscription_plan = await db.get(Subscription, data.subscription_id)
-        if not subscription_plan:
-            raise BadRequestException("Gói đăng ký không hợp lệ")
+        subscription_plan = None
+        if data.subscription_id:
+            subscription_plan = await db.get(Subscription, data.subscription_id)
+            if not subscription_plan:
+                raise BadRequestException("Gói đăng ký không hợp lệ")
 
-    # 3. Tạo user
-    new_user = await UserRepository.create(db, data)
+        new_user = await UserRepository.create(db, data)
 
-    # 4. Nếu có subscription_id mới tạo user_subscription
-    if subscription_plan:
-        from app.repositories.subscription_repository import SubscriptionRepository
-        from app.dto.subscription_dto import SubscriptionCreate as UserSubscriptionCreate
+        if subscription_plan:
+            from app.repositories.subscription_repository import SubscriptionRepository
+            from app.dto.subscription_dto import SubscriptionCreate as UserSubscriptionCreate
 
-        current_time = datetime.now(timezone.utc)
-        end_date = current_time + timedelta(days=subscription_plan.duration_days)
+            current_time = datetime.now(timezone.utc)
+            end_date = current_time + timedelta(days=subscription_plan.duration_days)
 
-        user_sub_data = UserSubscriptionCreate(
-            user_id=new_user.id,
-            subscription_id=data.subscription_id,
-            start_date=current_time,
-            end_date=end_date,
-            is_active=False
-        )
-        await SubscriptionRepository.create(db, user_sub_data)
+            user_sub_data = UserSubscriptionCreate(
+                user_id=new_user.id,
+                subscription_id=data.subscription_id,
+                start_date=current_time,
+                end_date=end_date,
+                is_active=False
+            )
+            await SubscriptionRepository.create(db, user_sub_data)
 
-    return new_user
-
+        return new_user
 
     @staticmethod
     async def send_password_reset_code(db: AsyncSession, email: str):
         user = await UserRepository.get_by_email(db, email.lower())
         if not user:
-            # To prevent email enumeration attacks, we don't reveal if the user exists.
-            # We'll just log a warning and proceed as if an email was sent.
             print(f"Password reset requested for non-existent user: {email}")
             return
 
@@ -154,20 +137,20 @@ async def register_user_direct(db: AsyncSession, data: UserCreate) -> User:
 
         user = await UserRepository.get_by_email(db, email.lower())
         if not user:
-            raise NotFoundException("User not found.") # Should not happen if code is valid
+            raise NotFoundException("User not found.")
 
         user.hashed_password = hash_password(new_password)
         await db.commit()
 
         await VerificationCodeRepository.delete(db, code_obj)
-    
+
     @staticmethod
     async def get_user(db: AsyncSession, user_id: uuid.UUID) -> User:
         user = await UserRepository.get_by_id(db, user_id)
         if not user:
             raise NotFoundException("Không tìm thấy người dùng")
         return user
-    
+
     @staticmethod
     async def update_user(db: AsyncSession, user_id: uuid.UUID, data: UserUpdate) -> User:
         db_user = await UserRepository.get_by_id(db, user_id)
@@ -175,6 +158,7 @@ async def register_user_direct(db: AsyncSession, data: UserCreate) -> User:
             raise NotFoundException("Không tìm thấy người dùng")
 
         update_data = data.dict(exclude_unset=True)
+
         if 'full_name' in update_data:
             db_user.full_name = update_data['full_name']
         if 'is_active' in update_data:
@@ -210,12 +194,15 @@ async def register_user_direct(db: AsyncSession, data: UserCreate) -> User:
         user = await UserRepository.get_by_id(db, user_id)
         if not user:
             raise NotFoundException("Không tìm thấy người dùng")
+
         if gemini_key is not None:
             user.gemini_api_key = token_encryption.encrypt(gemini_key)
         if openai_key is not None:
             user.openai_api_key = token_encryption.encrypt(openai_key)
+
         await db.commit()
         await db.refresh(user)
+
         return {
             "gemini_api_key": gemini_key,
             "openai_api_key": openai_key
@@ -244,13 +231,20 @@ async def register_user_direct(db: AsyncSession, data: UserCreate) -> User:
         user = await UserRepository.get_by_id(db, user_id)
         if not user:
             raise NotFoundException("Không tìm thấy người dùng")
+
         if gemini_key:
             user.gemini_api_key = None
         if openai_key:
             user.openai_api_key = None
+
         await db.commit()
         await db.refresh(user)
+
         return {
-            "gemini_api_key": None if gemini_key else (token_encryption.decrypt(user.gemini_api_key) if user.gemini_api_key else None),
-            "openai_api_key": None if openai_key else (token_encryption.decrypt(user.openai_api_key) if user.openai_api_key else None)
+            "gemini_api_key": None if gemini_key else (
+                token_encryption.decrypt(user.gemini_api_key) if user.gemini_api_key else None
+            ),
+            "openai_api_key": None if openai_key else (
+                token_encryption.decrypt(user.openai_api_key) if user.openai_api_key else None
+            )
         }

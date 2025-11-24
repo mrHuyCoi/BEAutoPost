@@ -16,7 +16,8 @@ class UserSubscription(Base):
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True) # Mỗi user chỉ có 1 subscription active
-    subscription_id = Column(UUID(as_uuid=True), ForeignKey("subscriptions.id"), nullable=False)
+    subscription_id = Column(UUID(as_uuid=True), ForeignKey("subscriptions.id"), nullable=True)
+
     
     start_date = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     end_date = Column(DateTime(timezone=True), nullable=True)

@@ -3,7 +3,6 @@ from typing import Optional
 from datetime import datetime
 import uuid
 
-
 class UserCreate(BaseModel):
     """DTO cho request tạo người dùng mới."""
     email: EmailStr = Field(..., description="Email của người dùng, phải là định dạng email hợp lệ")
@@ -20,6 +19,7 @@ class UserCreate(BaseModel):
         if len(v) < 8:
             raise ValueError('Mật khẩu phải có ít nhất 8 ký tự')
         return v
+
 
 
 class UserRead(BaseModel):
