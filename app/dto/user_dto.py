@@ -9,7 +9,10 @@ class UserCreate(BaseModel):
     email: EmailStr = Field(..., description="Email của người dùng, phải là định dạng email hợp lệ")
     password: str = Field(..., min_length=8, description="Mật khẩu của người dùng, tối thiểu 8 ký tự")
     full_name: Optional[str] = Field(None, description="Họ tên đầy đủ của người dùng")
-    subscription_id: uuid.UUID = Field(..., description="ID của gói đăng ký người dùng chọn")
+    subscription_id: Optional[uuid.UUID] = Field(
+        None,
+        description="ID của gói đăng ký người dùng chọn (có thể null)"
+    )
     
     @validator('password')
     def password_strength(cls, v):
