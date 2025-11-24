@@ -90,27 +90,27 @@ async def register_user(db: AsyncSession, data: UserCreate, verification_code: s
 
 
     @staticmethod
-    async def register_user_direct(db: AsyncSession, data: UserCreate) -> User:
-        """
-        Đăng ký người dùng trực tiếp không cần mã xác thực.
-        """
-        # 1. Kiểm tra email đã tồn tại chưa (case-insensitive)
-        existing_user = await UserRepository.get_by_email(db, data.email.lower())
-        if existing_user:
-            raise BadRequestException("Email đã được đăng ký.")
+async def register_user_direct(db: AsyncSession, data: UserCreate) -> User:
+    # 1. Kiểm tra email đã tồn tại chưa
+    existing_user = await UserRepository.get_by_email(db, data.email.lower())
+    if existing_user:
+        raise BadRequestException("Email đã được đăng ký.")
 
-        # 2. Lấy thông tin gói đăng ký đã chọn
+    # 2. Nếu có subscription_id thì mới kiểm tra
+    subscription_plan = None
+    if data.subscription_id:
         subscription_plan = await db.get(Subscription, data.subscription_id)
         if not subscription_plan:
             raise BadRequestException("Gói đăng ký không hợp lệ")
 
-        # 3. Tạo người dùng mới
-        new_user = await UserRepository.create(db, data)
+    # 3. Tạo user
+    new_user = await UserRepository.create(db, data)
 
-        # 4. Tạo bản ghi user_subscription
+    # 4. Nếu có subscription_id mới tạo user_subscription
+    if subscription_plan:
         from app.repositories.subscription_repository import SubscriptionRepository
         from app.dto.subscription_dto import SubscriptionCreate as UserSubscriptionCreate
-        
+
         current_time = datetime.now(timezone.utc)
         end_date = current_time + timedelta(days=subscription_plan.duration_days)
 
@@ -123,7 +123,8 @@ async def register_user(db: AsyncSession, data: UserCreate, verification_code: s
         )
         await SubscriptionRepository.create(db, user_sub_data)
 
-        return new_user
+    return new_user
+
 
     @staticmethod
     async def send_password_reset_code(db: AsyncSession, email: str):
