@@ -263,32 +263,25 @@ async def set_persona_config(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
+    """
+    Cấu hình hoặc cập nhật vai trò và tên cho chatbot AI của người dùng.
+    Gọi API từ ChatbotMobileStore.
+    """
     try:
+        # Lấy user_id từ current_user (đã được giải mã từ token)
         user_id = str(current_user.id)
         if not user_id:
             raise HTTPException(status_code=400, detail="Không thể xác định người dùng")
             
-        # SỬA LỖI: Chuyển đổi payload
-        persona_text = config.get("value")
-        if persona_text is None:
-             raise HTTPException(status_code=400, detail="Trường 'value' là bắt buộc")
-
-        # Tạo payload MỚI mà ChatbotMobileStore mong đợi
-        payload_to_send = {
-            "ai_name": "Trợ lý My", # (Tên bot, bạn có thể đổi)
-            "ai_role": persona_text
-        }
-            
+        # Gọi API config/persona từ ChatbotMobileStore
         result = await call_chatbot_api(
             endpoint=f"/config/persona/{user_id}",
             method="PUT",
-            data=payload_to_send,  # <--- GỬI PAYLOAD ĐÃ SỬA
+            data=config,
             user_id=user_id
         )
         return result
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e 
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -372,31 +365,24 @@ async def set_prompt_config(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
+    """
+    Thêm hoặc cập nhật system prompt tùy chỉnh cho người dùng.
+    Gọi API từ ChatbotMobileStore.
+    """
     try:
+        # Lấy user_id từ current_user (đã được giải mã từ token)
         user_id = str(current_user.id)
         if not user_id:
             raise HTTPException(status_code=400, detail="Không thể xác định người dùng")
             
-        # SỬA LỖI: Chuyển đổi payload
-        prompt_text = config.get("value")
-        if prompt_text is None:
-             raise HTTPException(status_code=400, detail="Trường 'value' là bắt buộc")
-
-        # Tạo payload MỚI mà ChatbotMobileStore mong đợi
-        payload_to_send = {
-            "custom_prompt": prompt_text
-        }
-            
         result = await call_chatbot_api(
             endpoint=f"/config/prompt/{user_id}",
             method="PUT",
-            data=payload_to_send,  # <--- GỬI PAYLOAD ĐÃ SỬA
+            data=config,
             user_id=user_id
         )
         return result
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e 
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/user-config/prompt")
