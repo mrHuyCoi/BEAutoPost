@@ -12,7 +12,7 @@ from app.models.material import Material
 from app.models.color import Color
 from app.models.device_color import DeviceColor
 from app.models.associations import device_material_association
-from app.dto.device_info_dto import DeviceInfoCreate, DeviceInfoUpdate
+from app.dto.device_info_dto import DeviceInfoCreate, DeviceInfoToSelect, DeviceInfoUpdate
 
 
 class DeviceInfoRepository:
@@ -50,7 +50,17 @@ class DeviceInfoRepository:
         await db.refresh(db_device_info)
         
         return db_device_info
-    
+    @staticmethod
+    async def get_all_device(db: AsyncSession, userId: uuid.UUID) -> List[DeviceInfoToSelect]:
+        query = (
+            select(DeviceInfo)
+            .where(DeviceInfo.user_id == userId)
+        )
+        result = await db.execute(query)
+        devices = result.scalars().all()
+
+        return [DeviceInfoToSelect.model_validate(d) for d in devices]
+
     @staticmethod
     async def get_by_id(db: AsyncSession, device_info_id: uuid.UUID, user_id: Optional[uuid.UUID] = None) -> Optional[DeviceInfo]:
         """

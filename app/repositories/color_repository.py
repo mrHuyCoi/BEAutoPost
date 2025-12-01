@@ -253,3 +253,22 @@ class ColorRepository:
         
         result = await db.execute(query)
         return result.scalar_one()
+    
+    @staticmethod
+    async def get_all_simple_by_user_id(db: AsyncSession, user_id: uuid.UUID) -> List[Color]:
+        """
+        Lấy tất cả màu sắc của user (bao gồm màu mặc định).
+        
+        Args:
+            db: Database session
+            user_id: ID của người dùng
+            
+        Returns:
+            Danh sách các đối tượng Color
+        """
+        query = select(Color).where(
+            (Color.user_id == user_id) | (Color.user_id.is_(None))
+        ).order_by(Color.name.asc())
+        
+        result = await db.execute(query)
+        return result.scalars().all()

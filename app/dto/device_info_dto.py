@@ -44,7 +44,15 @@ class DeviceInfoUpdate(BaseModel):
     warranty: Optional[str] = Field(None, description="Thông tin bảo hành")
     material_ids: Optional[List[uuid.UUID]] = Field(None, description="Danh sách ID của các vật liệu")
 
-
+class DeviceInfoToSelect(BaseModel):
+    """
+    DTO cho select option.
+    """
+    id: uuid.UUID
+    model: str
+    
+    class Config:
+        from_attributes = True
 class DeviceInfoRead(BaseModel):
     """
     DTO cho response trả về thông tin máy.

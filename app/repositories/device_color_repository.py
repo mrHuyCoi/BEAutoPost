@@ -93,16 +93,19 @@ class DeviceColorRepository:
             user_id: ID của người dùng (tùy chọn, để lọc theo user)
             
         Returns:
-            List[DeviceColor]: Danh sách các đối tượng DeviceColor kèm thông tin màu sắc
+            List[DeviceColor]: Danh sách các đối tượng DeviceColor kèm thông tin màu sắc và thiết bị
         """
-        query = select(DeviceColor).options(joinedload(DeviceColor.color)).where(DeviceColor.device_info_id == device_info_id)
+        query = select(DeviceColor).options(
+            joinedload(DeviceColor.color),
+            joinedload(DeviceColor.device_info)
+        ).where(DeviceColor.device_info_id == device_info_id)
         
         # Nếu có user_id, chỉ lấy liên kết của user đó hoặc liên kết mặc định
         if user_id:
             query = query.where((DeviceColor.user_id == user_id) | (DeviceColor.user_id.is_(None)))
         
         result = await db.execute(query)
-        return result.scalars().all()
+        return result.unique().scalars().all()
     
     @staticmethod
     async def delete(db: AsyncSession, device_color_id: uuid.UUID, user_id: Optional[uuid.UUID] = None) -> bool:
