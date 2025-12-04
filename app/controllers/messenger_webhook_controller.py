@@ -100,10 +100,10 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Request, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Request, status, UploadFile, File, Form, Query
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 import httpx
 
 from app.database.database import get_db
@@ -126,6 +126,39 @@ router = APIRouter()
 FACEBOOK_API_BASE_URL = settings.FACEBOOK_API_BASE_URL
 VERIFY_TOKEN: Optional[str] = getattr(settings, "FACEBOOK_VERIFY_TOKEN", None)
 APP_SECRET: Optional[str] = getattr(settings, "FACEBOOK_APP_SECRET", None)
+
+
+async def _push_message_to_websocket(user_id, page_id: str, sender_id: str, message_data: dict) -> None:
+    """
+    Push tin nhắn mới qua WebSocket để frontend nhận real-time.
+    Không block webhook nếu WebSocket fail.
+    """
+    try:
+        from app.controllers.websocket_controller import manager
+        
+        ws_message = {
+            "type": "new_message",
+            "event": "message_received",
+            "page_id": page_id,
+            "sender_id": sender_id,
+            "message": message_data,
+        }
+        
+        # Log chi tiết để debug
+        logger.info(
+            f"📨 Pushing message to WebSocket: user_id={user_id}, page_id={page_id}, sender_id={sender_id}, "
+            f"direction={message_data.get('direction')}, text={message_data.get('text', '')[:50]}..."
+        )
+        logger.debug(f"WebSocket message payload: {json.dumps(ws_message, ensure_ascii=False)}")
+        
+        await manager.broadcast_to_user(
+            str(user_id),
+            json.dumps(ws_message, ensure_ascii=False)
+        )
+        logger.info(f"✅ Successfully pushed message to WebSocket for user_id={user_id}")
+    except Exception as ws_error:
+        # Log lỗi nhưng không block webhook processing
+        logger.error(f"❌ Failed to push message via WebSocket: {ws_error}", exc_info=True)
 
 
 def _verify_signature(raw_body: bytes, signature_header: Optional[str]) -> bool:
@@ -312,6 +345,7 @@ async def receive_webhook(
 ):
     raw = await request.body()
     sig = request.headers.get("x-hub-signature-256")
+    logger.info(f"📥 Webhook received: signature={'present' if sig else 'missing'}")
     if not _verify_signature(raw, sig):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid signature")
 
@@ -434,6 +468,24 @@ async def receive_webhook(
                             )
                             db.add(msg)
                             await db.commit()
+                            
+                            # Push tin nhắn outbound qua WebSocket để frontend cập nhật real-time
+                            psid_for_ws = _extract_psid_from_event(event) or recipient_id or ""
+                            if psid_for_ws:
+                                await _push_message_to_websocket(
+                                    user_obj.id,
+                                    page_id,
+                                    psid_for_ws,
+                                    {
+                                        "id": str(msg.id),
+                                        "mid": mid,
+                                        "text": message_obj.get("text"),
+                                        "direction": "out",
+                                        "timestamp_ms": timestamp_ms,
+                                        "attachments": message_obj.get("attachments"),
+                                        "status": "replied",
+                                    }
+                                )
 
                         # Phát hiện echo từ người thật (không phải app hiện tại)
                         app_id = message_obj.get("app_id")
@@ -475,7 +527,14 @@ async def receive_webhook(
                     existing_in = await db.execute(_select(MessengerMessage).where(MessengerMessage.message_mid == mid))
                     ex = existing_in.scalars().first()
                     if ex:
+                        logger.debug(f"Duplicate message detected (mid={mid}), skipping")
                         continue
+
+                # Log khi nhận tin nhắn từ đối phương
+                logger.info(
+                    f"📩 INBOUND MESSAGE RECEIVED: page_id={recipient_id or page_id}, "
+                    f"sender_id={sender_id}, text={text[:100]}..., mid={mid}"
+                )
 
                 inbound = MessengerMessage(
                     user_id=user_obj.id,
@@ -491,6 +550,28 @@ async def receive_webhook(
                 )
                 db.add(inbound)
                 await db.commit()
+                
+                logger.info(
+                    f"💾 Message saved to database: id={inbound.id}, user_id={user_obj.id}, "
+                    f"page_id={recipient_id or page_id}, sender_id={sender_id}"
+                )
+
+                # Push tin nhắn inbound qua WebSocket để frontend nhận real-time
+                page_for_conv = (recipient_id or page_id)
+                await _push_message_to_websocket(
+                    user_obj.id,
+                    page_for_conv,
+                    sender_id,
+                    {
+                        "id": str(inbound.id),
+                        "mid": mid,
+                        "text": text,
+                        "direction": "in",
+                        "timestamp_ms": timestamp_ms,
+                        "attachments": message_obj.get("attachments"),
+                        "status": "received",
+                    }
+                )
 
                 # Check paused state before generating reply
                 page_for_conv = (recipient_id or page_id)
@@ -623,6 +704,212 @@ async def set_bot_config(
         "mobile_enabled": bool(cfg.mobile_enabled),
         "custom_enabled": bool(cfg.custom_enabled),
         "pause_ttl_minutes": int(getattr(cfg, "pause_ttl_minutes", 10) or 0),
+    }
+
+
+@router.get("/messages")
+async def get_messenger_messages(
+    page_id: str = Query(..., description="Facebook Page ID"),
+    psid: str = Query(..., description="PSID của người gửi (sender_id)"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(check_active_subscription(required_max_social_accounts=1)),
+):
+    """
+    Lấy tin nhắn Messenger từ database (không phải Facebook Graph API).
+    Endpoint này cho phép frontend query tin nhắn đã được lưu trong database,
+    hỗ trợ real-time khi kết hợp với WebSocket.
+    """
+    # Verify page ownership
+    stmt = select(SocialAccount).where(
+        SocialAccount.user_id == current_user.id,
+        SocialAccount.platform == "facebook",
+        SocialAccount.account_id == page_id,
+        SocialAccount.is_active == True,
+    )
+    res = await db.execute(stmt)
+    acc: SocialAccount | None = res.scalars().first()
+    if not acc:
+        raise HTTPException(status_code=404, detail="Không tìm thấy Page hoặc Page không hoạt động")
+
+    # Query messages from database
+    base_stmt = select(MessengerMessage).where(
+        MessengerMessage.user_id == current_user.id,
+        MessengerMessage.page_id == page_id,
+        MessengerMessage.sender_id == psid,
+    )
+    
+    # Count total
+    count_stmt = select(func.count()).select_from(MessengerMessage).where(
+        MessengerMessage.user_id == current_user.id,
+        MessengerMessage.page_id == page_id,
+        MessengerMessage.sender_id == psid,
+    )
+    total_result = await db.execute(count_stmt)
+    total = total_result.scalar_one()
+    
+    # Order and pagination
+    if order == "desc":
+        base_stmt = base_stmt.order_by(MessengerMessage.timestamp_ms.desc())
+    else:
+        base_stmt = base_stmt.order_by(MessengerMessage.timestamp_ms.asc())
+    
+    base_stmt = base_stmt.offset(offset).limit(limit)
+    result = await db.execute(base_stmt)
+    messages = result.scalars().all()
+    
+    return {
+        "data": [{
+            "id": str(m.id),
+            "message_mid": m.message_mid,
+            "text": m.message_text,
+            "direction": m.direction,
+            "timestamp_ms": m.timestamp_ms,
+            "status": m.status,
+            "attachments": m.attachments,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        } for m in messages],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "page_id": page_id,
+        "psid": psid,
+    }
+
+
+@router.get("/messages/latest")
+async def get_latest_messages(
+    page_id: str = Query(..., description="Facebook Page ID"),
+    psid: str = Query(None, description="PSID của người gửi (sender_id), optional"),
+    limit: int = Query(10, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(check_active_subscription(required_max_social_accounts=1)),
+):
+    """
+    Lấy tin nhắn mới nhất từ database để kiểm tra xem có tin nhắn mới không.
+    Hữu ích để debug và verify webhook đang hoạt động.
+    """
+    # Verify page ownership
+    stmt = select(SocialAccount).where(
+        SocialAccount.user_id == current_user.id,
+        SocialAccount.platform == "facebook",
+        SocialAccount.account_id == page_id,
+        SocialAccount.is_active == True,
+    )
+    res = await db.execute(stmt)
+    acc: SocialAccount | None = res.scalars().first()
+    if not acc:
+        raise HTTPException(status_code=404, detail="Không tìm thấy Page hoặc Page không hoạt động")
+
+    # Query latest messages
+    base_stmt = select(MessengerMessage).where(
+        MessengerMessage.user_id == current_user.id,
+        MessengerMessage.page_id == page_id,
+    )
+    
+    if psid:
+        base_stmt = base_stmt.where(MessengerMessage.sender_id == psid)
+    
+    base_stmt = base_stmt.order_by(MessengerMessage.timestamp_ms.desc()).limit(limit)
+    result = await db.execute(base_stmt)
+    messages = result.scalars().all()
+    
+    return {
+        "data": [{
+            "id": str(m.id),
+            "message_mid": m.message_mid,
+            "text": m.message_text,
+            "direction": m.direction,
+            "sender_id": m.sender_id,
+            "timestamp_ms": m.timestamp_ms,
+            "status": m.status,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
+        } for m in messages],
+        "count": len(messages),
+        "page_id": page_id,
+        "psid": psid,
+    }
+
+
+@router.get("/webhook/debug")
+async def debug_webhook_status(
+    page_id: str = Query(..., description="Facebook Page ID"),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(check_active_subscription(required_max_social_accounts=1)),
+):
+    """
+    Debug endpoint để kiểm tra:
+    - Webhook có nhận được tin nhắn không
+    - Tin nhắn mới nhất là gì
+    - WebSocket có hoạt động không
+    """
+    # Verify page ownership
+    stmt = select(SocialAccount).where(
+        SocialAccount.user_id == current_user.id,
+        SocialAccount.platform == "facebook",
+        SocialAccount.account_id == page_id,
+        SocialAccount.is_active == True,
+    )
+    res = await db.execute(stmt)
+    acc: SocialAccount | None = res.scalars().first()
+    if not acc:
+        raise HTTPException(status_code=404, detail="Không tìm thấy Page hoặc Page không hoạt động")
+
+    # Get latest messages
+    latest_stmt = select(MessengerMessage).where(
+        MessengerMessage.user_id == current_user.id,
+        MessengerMessage.page_id == page_id,
+    ).order_by(MessengerMessage.timestamp_ms.desc()).limit(5)
+    
+    latest_result = await db.execute(latest_stmt)
+    latest_messages = latest_result.scalars().all()
+    
+    # Count messages by direction
+    count_in_stmt = select(func.count()).select_from(MessengerMessage).where(
+        MessengerMessage.user_id == current_user.id,
+        MessengerMessage.page_id == page_id,
+        MessengerMessage.direction == "in",
+    )
+    count_out_stmt = select(func.count()).select_from(MessengerMessage).where(
+        MessengerMessage.user_id == current_user.id,
+        MessengerMessage.page_id == page_id,
+        MessengerMessage.direction == "out",
+    )
+    
+    count_in = (await db.execute(count_in_stmt)).scalar_one()
+    count_out = (await db.execute(count_out_stmt)).scalar_one()
+    
+    # Check WebSocket connections
+    try:
+        from app.controllers.websocket_controller import manager
+        ws_connected = str(current_user.id) in manager._by_user
+        ws_connections = len(manager._by_user.get(str(current_user.id), set())) if ws_connected else 0
+    except Exception:
+        ws_connected = False
+        ws_connections = 0
+    
+    return {
+        "page_id": page_id,
+        "user_id": str(current_user.id),
+        "websocket": {
+            "connected": ws_connected,
+            "connections_count": ws_connections,
+        },
+        "messages": {
+            "total_inbound": count_in,
+            "total_outbound": count_out,
+            "latest": [{
+                "id": str(m.id),
+                "direction": m.direction,
+                "sender_id": m.sender_id,
+                "text": m.message_text[:50] if m.message_text else None,
+                "timestamp_ms": m.timestamp_ms,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            } for m in latest_messages],
+        },
+        "status": "ok" if latest_messages else "no_messages_yet",
     }
 
 
