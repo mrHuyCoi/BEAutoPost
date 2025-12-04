@@ -3,7 +3,7 @@ from typing import Optional, List
 import uuid
 from fastapi import HTTPException, status
 from app.models.color import Color
-from app.dto.color_dto import ColorCreate, ColorUpdate, ColorRead   
+from app.dto.color_dto import ColorCreate, ColorUpdate, ColorRead, ColorSimpleRead   
 from app.repositories.color_repository import ColorRepository
 from app.exceptions.api_exceptions import BadRequestException, NotFoundException
 from app.models.device_info import DeviceInfo
@@ -158,3 +158,18 @@ class ColorService:
         user_id = None if current_user and current_user.is_admin else (current_user.id if current_user else None)
         count = await ColorRepository.count_all(db, search, user_id)
         return count or 0
+    
+    @staticmethod
+    async def get_colors_to_select(db: AsyncSession, user_id: uuid.UUID) -> List[ColorSimpleRead]:
+        """
+        Lấy danh sách màu sắc của user để chọn (chỉ id và name).
+        
+        Args:
+            db: Database session
+            user_id: ID của người dùng
+            
+        Returns:
+            Danh sách các đối tượng ColorSimpleRead
+        """
+        colors = await ColorRepository.get_all_simple_by_user_id(db, user_id)
+        return [ColorSimpleRead.model_validate(color) for color in colors]

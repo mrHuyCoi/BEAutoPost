@@ -7,7 +7,7 @@ import uuid
 import io
 
 from app.database.database import get_db
-from app.dto.device_info_dto import DeviceInfoCreate, DeviceInfoUpdate, DeviceInfoRead
+from app.dto.device_info_dto import DeviceInfoCreate, DeviceInfoToSelect, DeviceInfoUpdate, DeviceInfoRead
 from app.services.device_info_service import DeviceInfoService
 from app.services.excel_service import ExcelService
 from app.dto.response import ResponseModel
@@ -124,6 +124,27 @@ async def export_device_infos_to_excel(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Không thể xuất file Excel: {str(e)}")
+
+
+@router.get("/to-select", response_model=ResponseModel[List[DeviceInfoToSelect]])
+async def get_device_info_to_select(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Lấy danh sách thông tin máy để chọn.
+    """
+    try:
+        device_infos = await DeviceInfoService.get_device_info_to_select(db, current_user.id)
+        return ResponseModel(
+            data=device_infos,
+            message="Lấy danh sách thông tin máy để chọn thành công"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Đã xảy ra lỗi: {str(e)}"
+        )
 
 
 @router.get("/{device_info_id}", response_model=ResponseModel[DeviceInfoRead])
@@ -351,8 +372,6 @@ async def get_device_colors(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Đã xảy ra lỗi: {str(e)}"
         )
-
-
 
 class DeleteDeviceInfosRequest(BaseModel):
     ids: List[uuid.UUID]

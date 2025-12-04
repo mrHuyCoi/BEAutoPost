@@ -5,7 +5,9 @@ import uuid
 from app.repositories.device_color_repository import DeviceColorRepository
 from app.repositories.device_info_repository import DeviceInfoRepository
 from app.repositories.color_repository import ColorRepository
-from app.dto.device_color_dto import DeviceColorCreate
+from app.dto.device_color_dto import DeviceColorCreate, DeviceColorWithColorRead
+from app.dto.device_info_dto import DeviceInfoReadSimple
+from app.dto.color_dto import ColorRead
 from app.models.device_color import DeviceColor
 from app.models.color import Color
 from app.exceptions.not_found_exception import NotFoundException
@@ -71,8 +73,7 @@ class DeviceColorService:
             NotFoundException: Nếu không tìm thấy liên kết
         """
         device_color = await DeviceColorRepository.get_by_id(db, device_color_id, user_id)
-        if not device_color:
-            raise NotFoundException(f"Không tìm thấy liên kết với ID: {device_color_id}")
+        
         return device_color
     
     @staticmethod
@@ -99,7 +100,7 @@ class DeviceColorService:
         return await DeviceColorRepository.get_by_device_info_id(db, device_info_id, user_id)
     
     @staticmethod
-    async def get_device_colors_with_color_by_device_info_id(db: AsyncSession, device_info_id: uuid.UUID, user_id: Optional[uuid.UUID] = None) -> List[DeviceColor]:
+    async def get_device_colors_with_color_by_device_info_id(db: AsyncSession, device_info_id: uuid.UUID, user_id: Optional[uuid.UUID] = None) -> List[DeviceColorWithColorRead]:
         """
         Lấy tất cả các liên kết giữa thiết bị và màu sắc theo ID của thiết bị kèm thông tin màu sắc.
         
@@ -109,7 +110,7 @@ class DeviceColorService:
             user_id: ID của người dùng (tùy chọn, để lọc theo user)
             
         Returns:
-            List[DeviceColor]: Danh sách các đối tượng DeviceColor kèm thông tin màu sắc
+            List[DeviceColorWithColorRead]: Danh sách các đối tượng DeviceColorWithColorRead kèm thông tin màu sắc và thiết bị
         
         Raises:
             NotFoundException: Nếu không tìm thấy thiết bị
@@ -119,7 +120,27 @@ class DeviceColorService:
         if not device_info:
             raise NotFoundException(f"Không tìm thấy thiết bị với ID: {device_info_id}")
         
-        return await DeviceColorRepository.get_by_device_info_id_with_color(db, device_info_id, user_id)
+        device_colors = await DeviceColorRepository.get_by_device_info_id_with_color(db, device_info_id, user_id)
+        
+        # Convert sang DTO để tránh greenlet issues
+        result = []
+        for dc in device_colors:
+            # Convert color và device_info sang DTO
+            color_dto = ColorRead.model_validate(dc.color) if dc.color else None
+            device_info_dto = DeviceInfoReadSimple.model_validate(dc.device_info) if dc.device_info else None
+            
+            result.append(DeviceColorWithColorRead(
+                id=dc.id,
+                device_info_id=dc.device_info_id,
+                color_id=dc.color_id,
+                user_id=dc.user_id,
+                device_info=device_info_dto,
+                color=color_dto,
+                created_at=dc.created_at,
+                updated_at=dc.updated_at
+            ))
+        
+        return result
     
     @staticmethod
     async def delete_device_color(db: AsyncSession, device_color_id: uuid.UUID, user_id: Optional[uuid.UUID] = None) -> bool:

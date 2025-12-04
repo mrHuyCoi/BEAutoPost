@@ -8,7 +8,7 @@ from app.models.device_info import DeviceInfo
 from app.models.color import Color
 from app.models.device_storage import DeviceStorage
 from app.models.material import Material
-from app.dto.device_info_dto import DeviceInfoCreate, DeviceInfoUpdate, DeviceInfoRead
+from app.dto.device_info_dto import DeviceInfoCreate, DeviceInfoToSelect, DeviceInfoUpdate, DeviceInfoRead
 from app.repositories.device_info_repository import DeviceInfoRepository
 from app.repositories.device_color_repository import DeviceColorRepository
 from app.repositories.device_storage_repository import DeviceStorageRepository
@@ -51,6 +51,20 @@ class DeviceInfoService:
         db_device_info = await DeviceInfoRepository.create(db, device_create_dto)
         
         return await DeviceInfoService._convert_to_dto(db_device_info, db)
+    @staticmethod
+    async def get_device_info_to_select(db: AsyncSession, userId: uuid.UUID) -> List[DeviceInfoToSelect]:
+        """
+        Lấy danh sách thông tin máy dưới dạng DTO cho select option.
+        
+        Args:
+            db: Database session
+            userId: ID của người dùng
+            
+        Returns:
+            Danh sách các đối tượng DeviceInfoToSelect
+        """
+        device_infos = await DeviceInfoRepository.get_all_device(db, userId)
+        return device_infos
     
     @staticmethod
     async def get_device_info(db: AsyncSession, device_info_id: uuid.UUID) -> DeviceInfoRead:

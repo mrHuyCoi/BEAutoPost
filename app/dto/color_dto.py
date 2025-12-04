@@ -33,3 +33,14 @@ class ColorRead(BaseModel):
     
     class Config:
         from_attributes = True
+
+
+class ColorSimpleRead(BaseModel):
+    """
+    DTO đơn giản cho select option, chỉ có id và name.
+    """
+    id: uuid.UUID
+    name: str
+    
+    class Config:
+        from_attributes = True

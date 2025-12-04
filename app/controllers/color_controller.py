@@ -4,7 +4,7 @@ from typing import List, Optional
 import uuid
 
 from app.database.database import get_db
-from app.dto.color_dto import ColorCreate, ColorUpdate, ColorRead
+from app.dto.color_dto import ColorCreate, ColorUpdate, ColorRead, ColorSimpleRead
 from app.dto.device_info_dto import DeviceInfoRead
 from app.services.color_service import ColorService
 from app.dto.response import ResponseModel
@@ -37,6 +37,27 @@ async def create_color(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
+        )
+
+
+@router.get("/to-select", response_model=ResponseModel[List[ColorSimpleRead]])
+async def get_colors_to_select(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Lấy danh sách màu sắc của user để chọn (chỉ id và name).
+    """
+    try:
+        colors = await ColorService.get_colors_to_select(db, current_user.id)
+        return ResponseModel(
+            data=colors,
+            message="Lấy danh sách màu sắc để chọn thành công"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Đã xảy ra lỗi: {str(e)}"
         )
 
 
