@@ -17,6 +17,7 @@ import httpx
 
 from app.database.database import get_db
 from app.models.oa_webhook_event import OaWebhookEvent
+from app.models.oa_message import OaMessage
 from app.configs.settings import settings
 from app.models.oa_account import OaAccount
 from app.models.oa_token import OaToken
@@ -27,6 +28,52 @@ from app.services.zalo_oa_service import ZaloOAService
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
+
+
+async def _push_message_to_websocket(
+    owner_user_id: str,
+    oa_id: str,
+    partner_id: str,
+    message_data: dict
+) -> None:
+    """
+    Push tin nhắn Zalo OA mới qua WebSocket để frontend nhận real-time.
+    Không block webhook nếu WebSocket fail.
+    
+    Args:
+        owner_user_id: ID của user sở hữu OA account
+        oa_id: Zalo OA ID
+        partner_id: ID của người gửi/nhận (conversation_id)
+        message_data: Dict chứa thông tin tin nhắn (id, message_id, text, direction, timestamp, etc.)
+    """
+    try:
+        from app.controllers.websocket_controller import manager
+        
+        ws_message = {
+            "type": "new_message",
+            "event": "zalo_oa_message_received",
+            "oa_id": oa_id,
+            "partner_id": partner_id,
+            "conversation_id": partner_id,  # partner_id là conversation_id trong Zalo OA
+            "message": message_data,
+        }
+        
+        # Log chi tiết để debug
+        logger.info(
+            f"📨 Pushing Zalo OA message to WebSocket: user_id={owner_user_id}, oa_id={oa_id}, "
+            f"partner_id={partner_id}, direction={message_data.get('direction')}, "
+            f"text={message_data.get('text', '')[:50] if message_data.get('text') else 'N/A'}..."
+        )
+        logger.debug(f"WebSocket message payload: {json.dumps(ws_message, ensure_ascii=False)}")
+        
+        await manager.broadcast_to_user(
+            str(owner_user_id),
+            json.dumps(ws_message, ensure_ascii=False)
+        )
+        logger.info(f"✅ Successfully pushed Zalo OA message to WebSocket for user_id={owner_user_id}")
+    except Exception as ws_error:
+        # Log lỗi nhưng không block webhook processing
+        logger.error(f"❌ Failed to push Zalo OA message via WebSocket: {ws_error}", exc_info=True)
 
 
 def verify_signature(body_bytes: bytes, signature: Optional[str], headers: Optional[Dict[str, Any]] = None) -> bool:
@@ -229,6 +276,62 @@ async def zalo_oa_webhook(
                     "ZaloOA webhook: outbound from bot (id-match) -> no pause; owner_user_id=%s oa_id=%s partner_id=%s msg_id=%s",
                     owner_user_id, oa_id, partner_id, msg_id,
                 )
+                # Still save and push outbound message from bot
+                oa_msg = None
+                try:
+                    if msg_id:
+                        existing = await db.execute(
+                            select(OaMessage).where(OaMessage.message_id_from_zalo == str(msg_id))
+                        )
+                        if existing.scalar_one_or_none() is not None:
+                            oa_msg = existing.scalar_one()
+                        else:
+                            timestamp = _now_vn_naive()
+                            try:
+                                ts_val = payload.get("timestamp") or payload.get("timeStamp") or payload.get("ts")
+                                if ts_val:
+                                    if isinstance(ts_val, (int, float)):
+                                        if ts_val > 1e10:
+                                            timestamp = datetime.fromtimestamp(ts_val / 1000, tz=ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                                        else:
+                                            timestamp = datetime.fromtimestamp(ts_val, tz=ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                                    elif isinstance(ts_val, str):
+                                        timestamp = datetime.fromisoformat(ts_val.replace("Z", "+00:00")).astimezone(ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                            except Exception:
+                                pass
+                            oa_msg = OaMessage(
+                                oa_account_id=account.id,
+                                conversation_id=partner_id,
+                                direction="out",
+                                msg_type="text" if text else None,
+                                text=text,
+                                message_id_from_zalo=str(msg_id),
+                                timestamp=timestamp,
+                                raw_payload=payload,
+                            )
+                            db.add(oa_msg)
+                            await db.commit()
+                except IntegrityError:
+                    await db.rollback()
+                except Exception as db_error:
+                    await db.rollback()
+                    logger.error(f"Failed to save outbound message: {db_error}", exc_info=True)
+                
+                if oa_msg:
+                    await _push_message_to_websocket(
+                        owner_user_id,
+                        oa_id,
+                        partner_id,
+                        {
+                            "id": str(oa_msg.id),
+                            "message_id": str(msg_id) if msg_id else None,
+                            "text": text,
+                            "direction": "out",
+                            "msg_type": "text" if text else None,
+                            "timestamp": oa_msg.timestamp.isoformat() if oa_msg.timestamp else None,
+                            "raw_payload": payload,
+                        }
+                    )
                 return {"ok": True, "from_bot": True, "match": "id"}
             hit_text = bool(text and _bot_is_recently_sent(owner_user_id, oa_id, partner_id, str(text)))
             if hit_text:
@@ -237,6 +340,62 @@ async def zalo_oa_webhook(
                     "ZaloOA webhook: outbound from bot (text-match) -> no pause; owner_user_id=%s oa_id=%s partner_id=%s",
                     owner_user_id, oa_id, partner_id,
                 )
+                # Still save and push outbound message from bot
+                oa_msg = None
+                try:
+                    if msg_id:
+                        existing = await db.execute(
+                            select(OaMessage).where(OaMessage.message_id_from_zalo == str(msg_id))
+                        )
+                        if existing.scalar_one_or_none() is not None:
+                            oa_msg = existing.scalar_one()
+                    if not oa_msg:
+                        timestamp = _now_vn_naive()
+                        try:
+                            ts_val = payload.get("timestamp") or payload.get("timeStamp") or payload.get("ts")
+                            if ts_val:
+                                if isinstance(ts_val, (int, float)):
+                                    if ts_val > 1e10:
+                                        timestamp = datetime.fromtimestamp(ts_val / 1000, tz=ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                                    else:
+                                        timestamp = datetime.fromtimestamp(ts_val, tz=ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                                elif isinstance(ts_val, str):
+                                    timestamp = datetime.fromisoformat(ts_val.replace("Z", "+00:00")).astimezone(ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                        except Exception:
+                            pass
+                        oa_msg = OaMessage(
+                            oa_account_id=account.id,
+                            conversation_id=partner_id,
+                            direction="out",
+                            msg_type="text" if text else None,
+                            text=text,
+                            message_id_from_zalo=str(msg_id) if msg_id else None,
+                            timestamp=timestamp,
+                            raw_payload=payload,
+                        )
+                        db.add(oa_msg)
+                        await db.commit()
+                except IntegrityError:
+                    await db.rollback()
+                except Exception as db_error:
+                    await db.rollback()
+                    logger.error(f"Failed to save outbound message: {db_error}", exc_info=True)
+                
+                if oa_msg:
+                    await _push_message_to_websocket(
+                        owner_user_id,
+                        oa_id,
+                        partner_id,
+                        {
+                            "id": str(oa_msg.id),
+                            "message_id": str(msg_id) if msg_id else None,
+                            "text": text,
+                            "direction": "out",
+                            "msg_type": "text" if text else None,
+                            "timestamp": oa_msg.timestamp.isoformat() if oa_msg.timestamp else None,
+                            "raw_payload": payload,
+                        }
+                    )
                 return {"ok": True, "from_bot": True, "match": "text"}
             # Extra debug to understand mismatches
             try:
@@ -253,6 +412,63 @@ async def zalo_oa_webhook(
                 "ZaloOA webhook: paused due to outbound; owner_user_id=%s oa_id=%s partner_id=%s until=%s",
                 owner_user_id, oa_id, partner_id, until.isoformat(),
             )
+            # Still save and push outbound message (from human)
+            oa_msg = None
+            try:
+                if msg_id:
+                    existing = await db.execute(
+                        select(OaMessage).where(OaMessage.message_id_from_zalo == str(msg_id))
+                    )
+                    existing_msg = existing.scalar_one_or_none()
+                    if existing_msg is not None:
+                        oa_msg = existing_msg
+                if not oa_msg:
+                    timestamp = _now_vn_naive()
+                    try:
+                        ts_val = payload.get("timestamp") or payload.get("timeStamp") or payload.get("ts")
+                        if ts_val:
+                            if isinstance(ts_val, (int, float)):
+                                if ts_val > 1e10:
+                                    timestamp = datetime.fromtimestamp(ts_val / 1000, tz=ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                                else:
+                                    timestamp = datetime.fromtimestamp(ts_val, tz=ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                            elif isinstance(ts_val, str):
+                                timestamp = datetime.fromisoformat(ts_val.replace("Z", "+00:00")).astimezone(ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                    except Exception:
+                        pass
+                    oa_msg = OaMessage(
+                        oa_account_id=account.id,
+                        conversation_id=partner_id,
+                        direction="out",
+                        msg_type="text" if text else None,
+                        text=text,
+                        message_id_from_zalo=str(msg_id) if msg_id else None,
+                        timestamp=timestamp,
+                        raw_payload=payload,
+                    )
+                    db.add(oa_msg)
+                    await db.commit()
+            except IntegrityError:
+                await db.rollback()
+            except Exception as db_error:
+                await db.rollback()
+                logger.error(f"Failed to save outbound message: {db_error}", exc_info=True)
+            
+            if oa_msg:
+                await _push_message_to_websocket(
+                    owner_user_id,
+                    oa_id,
+                    partner_id,
+                    {
+                        "id": str(oa_msg.id),
+                        "message_id": str(msg_id) if msg_id else None,
+                        "text": text,
+                        "direction": "out",
+                        "msg_type": "text" if text else None,
+                        "timestamp": oa_msg.timestamp.isoformat() if oa_msg.timestamp else None,
+                        "raw_payload": payload,
+                    }
+                )
             return {"ok": True, "paused": 10, "until": until.isoformat()}
 
         # Inbound user message (text)
@@ -268,6 +484,94 @@ async def zalo_oa_webhook(
                     owner_user_id, oa_id, partner_id, (pu.isoformat() if pu else None),
                 )
                 return {"ok": True, "paused": True, "until": (pu.isoformat() if pu else None)}
+
+            # Save inbound message to database (if not duplicate)
+            oa_msg = None
+            try:
+                if msg_id:
+                    # Check for duplicate by message_id_from_zalo
+                    existing = await db.execute(
+                        select(OaMessage).where(OaMessage.message_id_from_zalo == str(msg_id))
+                    )
+                    if existing.scalar_one_or_none() is not None:
+                        logger.debug(f"Duplicate Zalo OA message detected (msg_id={msg_id}), skipping DB insert")
+                    else:
+                        # Extract timestamp from payload
+                        timestamp = None
+                        try:
+                            ts_val = payload.get("timestamp") or payload.get("timeStamp") or payload.get("ts")
+                            if ts_val:
+                                if isinstance(ts_val, (int, float)):
+                                    # Assume milliseconds if large number
+                                    if ts_val > 1e10:
+                                        timestamp = datetime.fromtimestamp(ts_val / 1000, tz=ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                                    else:
+                                        timestamp = datetime.fromtimestamp(ts_val, tz=ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                                elif isinstance(ts_val, str):
+                                    # Try parsing ISO format
+                                    timestamp = datetime.fromisoformat(ts_val.replace("Z", "+00:00")).astimezone(ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                        except Exception:
+                            timestamp = _now_vn_naive()
+
+                        oa_msg = OaMessage(
+                            oa_account_id=account.id,
+                            conversation_id=partner_id,
+                            direction="in",
+                            msg_type="text",
+                            text=text,
+                            message_id_from_zalo=str(msg_id) if msg_id else None,
+                            timestamp=timestamp or _now_vn_naive(),
+                            raw_payload=payload,
+                        )
+                        db.add(oa_msg)
+                        await db.commit()
+                        logger.info(
+                            f"💾 Zalo OA message saved to database: id={oa_msg.id}, oa_id={oa_id}, "
+                            f"partner_id={partner_id}, msg_id={msg_id}"
+                        )
+                else:
+                    # No msg_id, create without unique constraint
+                    timestamp = _now_vn_naive()
+                    oa_msg = OaMessage(
+                        oa_account_id=account.id,
+                        conversation_id=partner_id,
+                        direction="in",
+                        msg_type="text",
+                        text=text,
+                        message_id_from_zalo=None,
+                        timestamp=timestamp,
+                        raw_payload=payload,
+                    )
+                    db.add(oa_msg)
+                    await db.commit()
+                    logger.info(
+                        f"💾 Zalo OA message saved to database (no msg_id): id={oa_msg.id}, oa_id={oa_id}, "
+                        f"partner_id={partner_id}"
+                    )
+            except IntegrityError:
+                await db.rollback()
+                logger.debug(f"Duplicate Zalo OA message (integrity error), skipping")
+            except Exception as db_error:
+                await db.rollback()
+                logger.error(f"Failed to save Zalo OA message to database: {db_error}", exc_info=True)
+                # Continue processing even if DB save fails
+
+            # Push message to WebSocket
+            if oa_msg:
+                await _push_message_to_websocket(
+                    owner_user_id,
+                    oa_id,
+                    partner_id,
+                    {
+                        "id": str(oa_msg.id),
+                        "message_id": str(msg_id) if msg_id else None,
+                        "text": text,
+                        "direction": "in",
+                        "msg_type": "text",
+                        "timestamp": oa_msg.timestamp.isoformat() if oa_msg.timestamp else None,
+                        "raw_payload": payload,
+                    }
+                )
 
             # Get user's API key for X-API-Key auth
             api_key = await _get_user_api_key(db, account.owner_user_id)
@@ -333,6 +637,97 @@ async def zalo_oa_webhook(
                 except Exception:
                     pass
                 return {"ok": True, "paused": True, "until": (pu.isoformat() if pu else None)}
+
+            # Save inbound image message to database (if not duplicate)
+            oa_msg = None
+            try:
+                if msg_id:
+                    # Check for duplicate by message_id_from_zalo
+                    existing = await db.execute(
+                        select(OaMessage).where(OaMessage.message_id_from_zalo == str(msg_id))
+                    )
+                    if existing.scalar_one_or_none() is not None:
+                        logger.debug(f"Duplicate Zalo OA image message detected (msg_id={msg_id}), skipping DB insert")
+                    else:
+                        # Extract timestamp from payload
+                        timestamp = None
+                        try:
+                            ts_val = payload.get("timestamp") or payload.get("timeStamp") or payload.get("ts")
+                            if ts_val:
+                                if isinstance(ts_val, (int, float)):
+                                    if ts_val > 1e10:
+                                        timestamp = datetime.fromtimestamp(ts_val / 1000, tz=ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                                    else:
+                                        timestamp = datetime.fromtimestamp(ts_val, tz=ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                                elif isinstance(ts_val, str):
+                                    timestamp = datetime.fromisoformat(ts_val.replace("Z", "+00:00")).astimezone(ZoneInfo("Asia/Ho_Chi_Minh")).replace(tzinfo=None)
+                        except Exception:
+                            timestamp = _now_vn_naive()
+
+                        attachments = [{"type": "image", "url": img_url}]
+                        oa_msg = OaMessage(
+                            oa_account_id=account.id,
+                            conversation_id=partner_id,
+                            direction="in",
+                            msg_type="image",
+                            text=msg_text if msg_text else None,
+                            attachments=attachments,
+                            message_id_from_zalo=str(msg_id) if msg_id else None,
+                            timestamp=timestamp or _now_vn_naive(),
+                            raw_payload=payload,
+                        )
+                        db.add(oa_msg)
+                        await db.commit()
+                        logger.info(
+                            f"💾 Zalo OA image message saved to database: id={oa_msg.id}, oa_id={oa_id}, "
+                            f"partner_id={partner_id}, msg_id={msg_id}"
+                        )
+                else:
+                    # No msg_id, create without unique constraint
+                    timestamp = _now_vn_naive()
+                    attachments = [{"type": "image", "url": img_url}]
+                    oa_msg = OaMessage(
+                        oa_account_id=account.id,
+                        conversation_id=partner_id,
+                        direction="in",
+                        msg_type="image",
+                        text=msg_text if msg_text else None,
+                        attachments=attachments,
+                        message_id_from_zalo=None,
+                        timestamp=timestamp,
+                        raw_payload=payload,
+                    )
+                    db.add(oa_msg)
+                    await db.commit()
+                    logger.info(
+                        f"💾 Zalo OA image message saved to database (no msg_id): id={oa_msg.id}, oa_id={oa_id}, "
+                        f"partner_id={partner_id}"
+                    )
+            except IntegrityError:
+                await db.rollback()
+                logger.debug(f"Duplicate Zalo OA image message (integrity error), skipping")
+            except Exception as db_error:
+                await db.rollback()
+                logger.error(f"Failed to save Zalo OA image message to database: {db_error}", exc_info=True)
+                # Continue processing even if DB save fails
+
+            # Push message to WebSocket
+            if oa_msg:
+                await _push_message_to_websocket(
+                    owner_user_id,
+                    oa_id,
+                    partner_id,
+                    {
+                        "id": str(oa_msg.id),
+                        "message_id": str(msg_id) if msg_id else None,
+                        "text": msg_text if msg_text else None,
+                        "direction": "in",
+                        "msg_type": "image",
+                        "attachments": oa_msg.attachments,
+                        "timestamp": oa_msg.timestamp.isoformat() if oa_msg.timestamp else None,
+                        "raw_payload": payload,
+                    }
+                )
 
             # Get user's API key for X-API-Key auth
             api_key = await _get_user_api_key(db, account.owner_user_id)
