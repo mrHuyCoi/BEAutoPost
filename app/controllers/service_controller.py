@@ -92,7 +92,7 @@ async def get_all_services(
     current_user: User = Depends(get_current_user)
 ):
     try:
-        skip = (page - 1) * limit
+        # skip = (page - 1) * limit
         
         # SỬA: Kiểm tra Admin bằng 'role'
         user_id_to_filter = None
